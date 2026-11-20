@@ -1,0 +1,13 @@
+{
+  "name": "xdflib-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Node.js bridge for XDFLib — wraps @tencentcloud/chat SDK",
+  "main": "bridge.cjs",
+  "scripts": {
+    "start": "node bridge.cjs"
+  },
+  "dependencies": {
+    "@tencentcloud/chat": "^3.5.0"
+  }
+}

@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xdfvafinder"
+version = "0.1.0"
+description = "XDF 账号安全扫描器（内置 xdflib 协议库，只依赖公开 PyPI 包）"
+readme = "README.md"
+authors = [
+    { name = "SourceX271", email = "liyichen314@outlook.com" }
+]
+requires-python = ">=3.13"
+keywords = ["xdf", "account-audit", "security-testing", "reverse-engineering"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+]
+dependencies = [
+    "requests>=2.34.2",
+    "tqdm>=4.70.0",
+    "cryptography>=49.0",
+]
+
+[project.scripts]
+xdfvafinder = "xdfvafinder.scanner:main"
+xdf-debug-login = "xdfvafinder.debug_login:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.12",
+]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+# src/ 下同时包含本项目（xdfvafinder）和内置的协议库（xdflib）
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["xdflib*", "xdfvafinder*"]
+
+# 让安装后的包也带上内置库的许可与来源说明
+[tool.setuptools.package-data]
+xdflib = ["LICENSE", "VENDORED.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+# 内置协议库与上游保持一致，不参与本项目的 lint / 格式化
+extend-exclude = ["src/xdflib"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "RUF", "BLE"]
+ignore = [
+    "E501",   # 行宽交给 formatter 处理
+    "RUF001", # 允许中文全角标点
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["xdfvafinder", "xdflib"]
+
+[tool.ruff.format]
+quote-style = "double"

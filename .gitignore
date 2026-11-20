@@ -1,0 +1,25 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# 工具缓存
+.pytest_cache/
+.ruff_cache/
+
+# Node bridge（IM 可选依赖）
+bridge/node_modules/
+
+# 扫描运行时产物（含明文密码，注意不要提交）
+scan_progress.json
+scan_progress.json.tmp
+scan.log
+valid_accounts.txt
+
+output/

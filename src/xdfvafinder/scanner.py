@@ -30,6 +30,7 @@ from tqdm import tqdm
 from xdflib import XDFAuthClient
 from xdflib.models import LoginResult, StudentProfile
 
+from .cache import CACHE_FILE, DEFAULT_TTL_DAYS, InvalidCache
 from .checkpoint import ProgressTracker, ScanState, read_state, write_state
 from .env import ENV_CHOICES, env_name, resolve_env
 from .storage import ResultWriter
@@ -62,7 +63,7 @@ def setup_logging(verbose: bool = False, log_file: str | Path = LOG_FILE) -> log
     file_handler.setFormatter(fmt)
 
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.WARNING)
+    console_handler.setLevel(logging.DEBUG if verbose else logging.WARNING)
     console_handler.setFormatter(fmt)
 
     scanner_logger = logging.getLogger("scanner")
@@ -107,6 +108,9 @@ class Scanner:
         output: str | Path = OUTPUT_FILE,
         resume: bool = False,
         checkpoint_file: str | Path = CHECKPOINT_FILE,
+        incremental: bool = False,
+        cache_file: str | Path = CACHE_FILE,
+        cache_ttl_days: float = DEFAULT_TTL_DAYS,
     ) -> None:
         if not 0 <= start <= MAX_DIGITS:
             raise ValueError(f"start 必须在 0~{MAX_DIGITS} 之间: {start}")
@@ -123,6 +127,11 @@ class Scanner:
         self.env = resolve_env(env)
         self.output_file = Path(output)
         self.checkpoint_file = Path(checkpoint_file)
+
+        # 增量扫描：跳过缓存里"上次确认不可用"的号码（同时更新缓存）
+        self.incremental = incremental
+        self.cache = InvalidCache(cache_file, ttl_days=cache_ttl_days) if incremental else None
+        self.skipped_count = 0
 
         # 客户端（XDFAuthClient 无状态，可多线程共享）
         self.auth = XDFAuthClient(env=self.env)
@@ -255,6 +264,9 @@ class Scanner:
 
         with self._stats_lock:
             self.invalid_count += 1
+        # 只有"接口正常返回、判定不可用"才写入缓存；task_error 等异常不算
+        if self.cache is not None and outcome.error_type is None:
+            self.cache.mark_invalid(outcome.digits)
         logger.debug(
             "【无效】%s code=%s msg=%s", outcome.mobile, outcome.error_code, outcome.error_msg
         )
@@ -328,11 +340,28 @@ class Scanner:
             logger.warning("断点已覆盖到 %05d，没有需要扫描的号码", self.start - 1)
             return False
 
-        total = self.end - self.start + 1
+        # 增量扫描：用缓存过滤待扫描号码；被跳过的号码同样算"已处理"，
+        # 这样断点水位能正常推进，--resume 不会倒回去重扫。
+        queue: deque[int] = deque()
+        skipped: list[int] = []
+        if self.cache is None:
+            queue.extend(range(self.start, self.end + 1))
+        else:
+            self.cache.load()
+            for digits in range(self.start, self.end + 1):
+                if self.cache.is_invalid(digits):
+                    skipped.append(digits)
+                else:
+                    queue.append(digits)
+            self.skipped_count = len(skipped)
+            self._log_incremental()
+
+        total = len(queue)
         logger.info(
-            "开始扫描: range=%d-%d (%d 个号码), threads=%d, delay=%.1fs, env=%s",
+            "开始扫描: range=%d-%d (%d 个号码), 待扫描=%d, threads=%d, delay=%.1fs, env=%s",
             self.start,
             self.end,
+            self.end - self.start + 1,
             total,
             self.threads,
             self.delay,
@@ -340,6 +369,8 @@ class Scanner:
         )
 
         tracker = ProgressTracker(self.start)
+        for digits in skipped:
+            tracker.mark(digits)
         last_saved = self.start - 1
         futures: dict[Future[LoginOutcome], int] = {}
         interrupted = False
@@ -350,10 +381,10 @@ class Scanner:
 
         try:
             with (
-                tqdm(total=total, desc="扫描进度", unit="个", ncols=100) as pbar,
+                # disable=None: 非 TTY（CI、管道、pytest）下自动隐藏进度条
+                tqdm(total=total, desc="扫描进度", unit="个", ncols=100, disable=None) as pbar,
                 ThreadPoolExecutor(max_workers=self.threads) as executor,
             ):
-                queue = deque(range(self.start, self.end + 1))
                 self._fill(executor, queue, futures)
 
                 while futures:
@@ -392,9 +423,34 @@ class Scanner:
             if watermark is not None and watermark > last_saved:
                 self.save_checkpoint(watermark)
                 logger.info("进度已保存到 %s", self.checkpoint_file)
+            if self.cache is not None:
+                self.cache.prune()
+                self.cache.save()
+                logger.info(
+                    "增量缓存已更新: %s（%d 条不可用）",
+                    self.cache.path,
+                    len(self.cache),
+                )
 
         self._print_summary(interrupted=interrupted, elapsed=time.monotonic() - started_at)
         return interrupted
+
+    def _log_incremental(self) -> None:
+        """打印增量扫描的缓存命中情况。"""
+        cache = self.cache
+        if cache is None:
+            return
+        ttl = "永不过期" if cache.ttl_days is None else f"{cache.ttl_days:g} 天"
+        if self.skipped_count:
+            logger.info(
+                "增量扫描: 跳过 %d 个上次确认不可用的号码，待扫描 %d 个（缓存 %d 条，TTL %s）",
+                self.skipped_count,
+                self.end - self.start + 1 - self.skipped_count,
+                len(cache),
+                ttl,
+            )
+        else:
+            logger.info("增量扫描: 没有可跳过的号码（缓存 %d 条，TTL %s）", len(cache), ttl)
 
     def _fill(
         self,
@@ -431,6 +487,9 @@ class Scanner:
         print(f"  有效账号: {self.valid_count}")
         print(f"  无效账号: {self.invalid_count}")
         print(f"  网络错误: {self.error_count}")
+        if self.cache is not None:
+            print(f"  跳过（上次不可用）: {self.skipped_count}")
+            print(f"  增量缓存: {self.cache.path}（{len(self.cache)} 条）")
         print(f"  耗时:     {elapsed:.1f}s")
         print(f"  有效账号已保存到: {self.output_file}")
         if self.checkpoint_file.exists():
@@ -505,6 +564,18 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"断点文件 (默认: {CHECKPOINT_FILE})",
     )
     parser.add_argument("--log-file", default=LOG_FILE, help=f"日志文件 (默认: {LOG_FILE})")
+    parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help="增量扫描：跳过缓存中上次确认不可用的号码，并更新缓存",
+    )
+    parser.add_argument("--cache", default=CACHE_FILE, help=f"增量缓存文件 (默认: {CACHE_FILE})")
+    parser.add_argument(
+        "--cache-ttl",
+        type=_non_negative_float,
+        default=DEFAULT_TTL_DAYS,
+        help=f"缓存有效期（天），0 表示永不过期 (默认: {DEFAULT_TTL_DAYS:g})",
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="输出详细日志到控制台")
     return parser
 
@@ -527,6 +598,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         output=args.output,
         resume=args.resume,
         checkpoint_file=args.checkpoint,
+        incremental=args.incremental,
+        cache_file=args.cache,
+        cache_ttl_days=args.cache_ttl,
     )
     return 130 if scanner.run() else 0
 

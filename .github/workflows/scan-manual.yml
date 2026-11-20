@@ -1,0 +1,76 @@
+# 手动扫描：Actions → Scan (manual) → Run workflow
+#
+# 默认扫描 test 环境；prod 必须勾选 confirm_prod（确认已获得 XDF 授权）才会执行。
+
+name: Scan (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "扫描环境（prod 需要额外确认）"
+        type: choice
+        options:
+          - test
+          - prod
+        default: test
+      confirm_prod:
+        description: "确认已获得 prod 环境授权（env=prod 时必勾）"
+        type: boolean
+        default: false
+      start:
+        description: "起始 digits（0~99999）"
+        type: string
+        default: "0"
+      end:
+        description: "结束 digits（0~99999）"
+        type: string
+        default: "99999"
+      chunk_size:
+        description: "每个 job 负责的号码段长度"
+        type: string
+        default: "10000"
+      threads:
+        description: "单个 job 的并发线程数"
+        type: string
+        default: "3"
+      delay:
+        description: "单个 job 的请求间隔（秒）"
+        type: string
+        default: "0.5"
+      max_parallel:
+        description: "同时运行的 job 数（1~8）"
+        type: string
+        default: "2"
+      incremental:
+        description: "增量扫描（跳过上次确认不可用的号码）"
+        type: boolean
+        default: true
+      cache_ttl:
+        description: "增量缓存有效期（天），0 表示永不过期"
+        type: string
+        default: "30"
+      verbose:
+        description: "输出详细日志"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: 扫描
+    uses: ./.github/workflows/scan-run.yml
+    with:
+      env: ${{ inputs.env }}
+      start: ${{ inputs.start }}
+      end: ${{ inputs.end }}
+      chunk_size: ${{ inputs.chunk_size }}
+      threads: ${{ inputs.threads }}
+      delay: ${{ inputs.delay }}
+      max_parallel: ${{ inputs.max_parallel }}
+      incremental: ${{ inputs.incremental }}
+      cache_ttl: ${{ inputs.cache_ttl }}
+      verbose: ${{ inputs.verbose }}
+      allow_prod: ${{ inputs.confirm_prod }}

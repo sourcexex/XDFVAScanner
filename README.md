@@ -79,6 +79,9 @@ uv run xdf-debug-login -m 14400000444 -p XdFopt00000 --env test
 | `--output` | `valid_accounts.txt` | 结果输出文件 |
 | `--checkpoint` | `scan_progress.json` | 断点文件路径 |
 | `--log-file` | `scan.log` | 日志文件路径 |
+| `--incremental` | `false` | 增量扫描：跳过上次确认不可用的号码 |
+| `--cache` | `scan_cache.json` | 增量缓存文件 |
+| `--cache-ttl` | `30` | 增量缓存有效期（天），`0` 表示永不过期 |
 | `--verbose` / `-v` | `false` | 控制台输出详细日志 |
 
 ### 示例
@@ -103,6 +106,7 @@ uv run python scanner.py --resume
 - **并发**：线程池同时在途的任务数有上限（`4 × threads`），内存占用不随号段长度增长，`Ctrl+C` 也能立即停止派发
 - **日志**：所有信息写入 `scan.log`（控制台默认只显示警告和错误，加 `-v` 显示全部）
 - **统计**：`--resume` 时会接续断点里记录的总数与有效数，汇总里是累计值
+- **增量**：`--incremental` 跳过缓存中上次确认不可用的号码，汇总里会单独显示跳过数量
 
 ### 断点与中断恢复
 
@@ -119,6 +123,29 @@ uv run python scanner.py --resume
 uv run python scanner.py --output output/valid_accounts.txt \
     --checkpoint output/scan_progress.json --log-file output/scan.log --resume
 ```
+
+### 增量扫描
+
+`--incremental` 会读取一份"不可用账号缓存"，把上次已经确认不可用的号码直接跳过，
+只请求可能有效或还没扫过的号码：
+
+```bash
+# 第一次（没有缓存）：全量扫描，同时记录确认不可用的号码
+uv run python scanner.py --start 0 --end 99999 --env test --incremental
+
+# 之后：自动跳过上次不可用的，只复查已知有效 / 新增的号码
+uv run python scanner.py --start 0 --end 99999 --env test --incremental
+```
+
+- 缓存文件默认 `scan_cache.json`（`--cache` 可改），内容是 `号码 -> 确认不可用时间`
+- 只有**明确被拒绝**的账号才进缓存：网络错误、任务异常、中断都不算，下次会重试
+- 条目默认 30 天过期（`--cache-ttl 30`），过期后重新检查；`--cache-ttl 0` 表示永不过期
+- 已知有效的账号**不会**被跳过，每次增量都会重新登录确认一次（数量很少，成本很低）
+- 被跳过的号码同样计入断点水位，所以 `--incremental --resume` 可以一起用，不会倒回去重扫
+- 缓存里只有号码和时间戳，不含密码；仍建议和结果文件一样妥善保管
+- 汇总里会多两行：`跳过（上次不可用）` 和 `增量缓存` 的条目数
+
+典型效果：首次全量 10 万号后，第二周增量只剩"历史有效账号 + 新号段"量级的请求。
 
 ### 输出文件格式
 
@@ -169,17 +196,84 @@ uv run python debug_login.py -m 13800138000 -p mypassword --env test
 以上文件都已写入 `.gitignore`。由于内容包含账号凭据，请只在授权环境保存，
 必要时限制目录权限（例如 `chmod 600` / 单独的测试机）。
 
+## GitHub Actions
+
+仓库里带了三份工作流，手动扫描和每周定时扫描共用一个可复用流程：
+
+| 工作流 | 文件 | 触发方式 | 默认行为 |
+|---|---|---|---|
+| Scan (manual) | `.github/workflows/scan-manual.yml` | 手动 `Run workflow` | `test` 环境、全号段、每片 10000 个号码 |
+| Scan (weekly) | `.github/workflows/scan-weekly.yml` | 每周一 01:00 UTC + 手动 | 读仓库变量，缺省 `test` 环境 |
+| Scan (reusable) | `.github/workflows/scan-run.yml` | 被上面两个调用 | plan → scan → report |
+
+执行流程：`plan` 校验参数并把号段切成若干片 → `scan` 用矩阵并发跑分片（每个 job 独立扫描，
+受 6 小时 job 上限约束）→ `report` 合并去重、生成 `scan_summary.json`，并在 run 页面写入汇总表。
+
+### 手动扫描
+
+`Actions → Scan (manual) → Run workflow`，可填：
+
+| 输入 | 说明 |
+|---|---|
+| `env` | `test` / `prod` |
+| `confirm_prod` | `env=prod` 时**必须勾选**（确认已获 XDF 授权），否则 plan 阶段直接失败 |
+| `start` / `end` | 号段（0~99999） |
+| `chunk_size` | 每个 job 负责的号码数 |
+| `threads` / `delay` | 单 job 的线程数与请求间隔（秒） |
+| `max_parallel` | 同时运行的 job 数（1~8） |
+| `verbose` | 输出详细日志 |
+
+### 每周自动扫描
+
+- 时间：`0 1 * * 1`，即**每周一 01:00 UTC / 北京时间 09:00**
+- 参数取自仓库变量（`Settings → Secrets and variables → Actions → Variables`）：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `SCAN_ENV` | `test` | 扫描环境 |
+| `SCAN_START` / `SCAN_END` | `0` / `99999` | 号段 |
+| `SCAN_CHUNK_SIZE` | `10000` | 每片号码数 |
+| `SCAN_THREADS` | `3` | 单 job 线程数 |
+| `SCAN_DELAY` | `0.5` | 单 job 请求间隔（秒） |
+| `SCAN_MAX_PARALLEL` | `2` | 并发 job 数（1~8） |
+| `SCAN_CACHE_TTL` | `30` | 增量缓存有效期（天），`0` 表示永不过期 |
+| `SCAN_ALLOW_PROD` | 未设置 | 设为 `true` 才允许每周扫 `prod` |
+
+- 增量扫描默认开启：每个分片先从上一次运行的 Actions Cache 恢复 `scan_cache.json`，
+  扫完由合并 job 汇总、保存为新的缓存。**首次运行等于全量**，之后会跳过已知不可用的号码，快很多
+- 想强制全量复查：手动触发时把 `incremental` 设为 `false`，或到仓库 Settings → Actions → Caches 删掉缓存
+
+> `schedule` 只在**默认分支**上生效：改完工作流要先推送到默认分支，定时任务才会开始计时。
+> 另外公开仓库若连续 60 天没有任何提交，GitHub 会自动暂停定时工作流（可在 Actions 页面手动启用）。
+> 同一环境的扫描会串行排队（`concurrency`），手动触发不会和定时任务叠在一起。
+
+### 产物与配额
+
+- 每个分片：`scan-chunk-<start>-<end>-<attempt>` 产物（14 天），含结果文件、断点、日志和增量缓存片段
+- 合并结果：`scan-result-<attempt>` 产物（30 天），含 `valid_accounts_merged.txt`、`scan_summary.json`、
+  合并后的 `scan_cache.json`（名称带 attempt 后缀，重跑不会和上一次冲突）
+- 单个 job 超时 350 分钟；建议 `chunk_size × delay` 控制在 4 小时以内
+- 运行分钟粗算：`号码数 × delay / 60`。全量 10 万号 + `delay=0.5` ≈ 833 分钟/次；
+  私有仓库免费额度是 2000 分钟/月，建议调小号段、`SCAN_DELAY`（例如 `0.2`）或降低频率
+- runner 是一次性的，`--resume` 在 CI 里没有意义：断点只在单个 job 内消解在途号码，
+  跨 job / 跨运行不会续扫，失败就重跑那一片
+
+> ⚠️ artifact 里同样是**明文密码**。请收紧仓库可见性、按需缩短保留期，并在每次定时扫描前
+> 确认授权仍然有效；`prod` 默认不允许自动扫描。
+
 ## 项目结构
 
 ```
 XDFVAScanner/
 ├── scanner.py              # 兼容入口 → src/xdfvafinder/scanner.py
 ├── debug_login.py          # 兼容入口 → src/xdfvafinder/debug_login.py
+├── .github/workflows/      # 手动扫描 / 每周定时扫描 / 可复用扫描流程
 ├── src/
 │   ├── xdfvafinder/        # 本项目代码
 │   │   ├── scanner.py      #   扫描主流程（并发、限速、进度）
 │   │   ├── debug_login.py  #   单账号抓包式调试
 │   │   ├── checkpoint.py   #   断点读写 + 连续水位
+│   │   ├── cache.py        #   增量缓存（记住上次不可用的号码）
 │   │   ├── storage.py      #   结果文件写入（线程安全）
 │   │   ├── env.py          #   test/prod → xdflib 环境配置
 │   │   └── __main__.py     #   python -m xdfvafinder

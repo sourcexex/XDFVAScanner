@@ -1,6 +1,7 @@
 """扫描器逻辑测试（网络层全部 mock，不产生真实请求）。"""
 
 import json
+from datetime import datetime, timedelta
 from unittest import mock
 
 import xdflib.auth as auth_mod
@@ -215,3 +216,111 @@ class TestRun:
         content = output.read_text(encoding="utf-8")
         assert content.startswith("# 旧内容\n")
         assert len(_rows(output)) == 3
+
+
+class TestIncremental:
+    def _write_cache(self, path, digits: list[int], *, days_ago: int = 1) -> None:
+        stamp = (datetime.now() - timedelta(days=days_ago)).isoformat(timespec="seconds")
+        path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "updated_at": stamp,
+                    "invalid": {str(digits): stamp for digits in digits},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_skips_cached_invalid_digits(self, tmp_path):
+        cache_file = tmp_path / "scan_cache.json"
+        self._write_cache(cache_file, [0, 1])
+        scanner = _scanner(tmp_path, threads=1, incremental=True, cache_file=cache_file)
+
+        with (
+            mock.patch.object(auth_mod, "_post_json", return_value=LOGIN_OK) as post,
+            mock.patch.object(auth_mod, "_get_json", return_value=STUDENTS_OK),
+        ):
+            scanner.run(install_signals=False)
+
+        assert post.call_count == 1  # 只请求了 digits=2
+        assert scanner.skipped_count == 2
+        rows = _rows(tmp_path / "valid_accounts.txt")
+        assert len(rows) == 1
+        assert rows[0].startswith("14400002444|")
+
+    def test_records_new_invalid_accounts(self, tmp_path):
+        cache_file = tmp_path / "scan_cache.json"
+        scanner = _scanner(tmp_path, threads=1, incremental=True, cache_file=cache_file)
+
+        with mock.patch.object(auth_mod, "_post_json", return_value=LOGIN_REJECTED):
+            scanner.run(install_signals=False)
+
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
+        assert set(data["invalid"]) == {"0", "1", "2"}
+
+    def test_second_incremental_run_skips_everything(self, tmp_path):
+        cache_file = tmp_path / "scan_cache.json"
+        first = _scanner(tmp_path, threads=1, incremental=True, cache_file=cache_file)
+        with mock.patch.object(auth_mod, "_post_json", return_value=LOGIN_REJECTED):
+            first.run(install_signals=False)
+
+        second = _scanner(tmp_path, threads=1, incremental=True, cache_file=cache_file)
+        with mock.patch.object(auth_mod, "_post_json", return_value=LOGIN_REJECTED) as post:
+            interrupted = second.run(install_signals=False)
+
+        assert post.call_count == 0
+        assert interrupted is False
+        assert second.skipped_count == 3
+        assert second.total_scanned == 0
+        # 全部跳过时断点仍应推进到末尾
+        state = json.loads((tmp_path / "scan_progress.json").read_text(encoding="utf-8"))
+        assert state["last_digits"] == 2
+
+    def test_network_error_is_not_cached(self, tmp_path):
+        cache_file = tmp_path / "scan_cache.json"
+        scanner = _scanner(tmp_path, threads=1, incremental=True, cache_file=cache_file)
+
+        with mock.patch.object(auth_mod, "_post_json", side_effect=RuntimeError("boom")):
+            scanner.run(install_signals=False)
+
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
+        assert data["invalid"] == {}
+
+    def test_task_error_is_not_cached(self, tmp_path):
+        cache_file = tmp_path / "scan_cache.json"
+        scanner = _scanner(tmp_path, threads=1, incremental=True, cache_file=cache_file)
+
+        with mock.patch.object(scanner, "try_login", side_effect=RuntimeError("boom")):
+            scanner.run(install_signals=False)
+
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
+        assert data["invalid"] == {}
+        assert scanner.error_count == 0  # task_error 归入无效计数，但不进缓存
+
+    def test_expired_cache_entries_are_rescanned(self, tmp_path):
+        cache_file = tmp_path / "scan_cache.json"
+        self._write_cache(cache_file, [0, 1, 2], days_ago=10)
+        scanner = _scanner(
+            tmp_path,
+            threads=1,
+            incremental=True,
+            cache_file=cache_file,
+            cache_ttl_days=7,
+        )
+
+        with mock.patch.object(auth_mod, "_post_json", return_value=LOGIN_REJECTED) as post:
+            scanner.run(install_signals=False)
+
+        assert post.call_count == 3
+        assert scanner.skipped_count == 0
+
+    def test_without_incremental_no_cache_is_written(self, tmp_path):
+        cache_file = tmp_path / "scan_cache.json"
+        scanner = _scanner(tmp_path, threads=1, cache_file=cache_file)
+
+        with mock.patch.object(auth_mod, "_post_json", return_value=LOGIN_REJECTED):
+            scanner.run(install_signals=False)
+
+        assert not cache_file.exists()
+        assert scanner.skipped_count == 0

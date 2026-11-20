@@ -16,10 +16,12 @@ wheels/
 # Node bridge（IM 可选依赖）
 bridge/node_modules/
 
-# 扫描运行时产物（含明文密码，注意不要提交）
+# 扫描运行时产物（含明文密码/账号列表，注意不要提交）
 scan_progress.json
 scan_progress.json.tmp
 scan.log
 valid_accounts.txt
+scan_cache.json
+scan_cache.json.tmp
 
 output/

@@ -1,0 +1,404 @@
+# 可复用的扫描流程：plan（校验参数 + 切分号段）→ scan（矩阵并发）→ report（合并结果）
+#
+# 由 scan-manual.yml（手动）和 scan-weekly.yml（每周定时）通过 workflow_call 调用。
+# 所有输入都是字符串，数值校验在 plan job 里完成，非法输入会直接失败并给出原因。
+
+name: Scan (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      env:
+        description: "扫描环境：test 或 prod"
+        type: string
+        default: "test"
+      start:
+        description: "起始 digits（0~99999）"
+        type: string
+        default: "0"
+      end:
+        description: "结束 digits（0~99999）"
+        type: string
+        default: "99999"
+      chunk_size:
+        description: "每个 job 负责的号码段长度"
+        type: string
+        default: "10000"
+      threads:
+        description: "单个 job 的并发线程数"
+        type: string
+        default: "3"
+      delay:
+        description: "单个 job 的请求间隔（秒）"
+        type: string
+        default: "0.5"
+      max_parallel:
+        description: "同时运行的 job 数（1~8）"
+        type: string
+        default: "2"
+      incremental:
+        description: "增量扫描：跳过上次确认不可用的号码（依赖增量缓存）"
+        type: boolean
+        default: true
+      cache_ttl:
+        description: "增量缓存有效期（天），0 表示永不过期"
+        type: string
+        default: "30"
+      verbose:
+        description: "是否输出详细日志"
+        type: boolean
+        default: false
+      allow_prod:
+        description: "是否允许对 prod 环境扫描（必须确认已获授权）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# 同一环境的扫描串行执行，避免手动触发和定时任务叠在一起打满对方接口
+concurrency:
+  group: scan-${{ inputs.env }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: 校验参数并切分号段
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      max_parallel: ${{ steps.plan.outputs.max_parallel }}
+      chunk_count: ${{ steps.plan.outputs.chunk_count }}
+      digits_total: ${{ steps.plan.outputs.digits_total }}
+    steps:
+      - name: 校验输入
+        id: plan
+        env:
+          SCAN_ENV: ${{ inputs.env }}
+          SCAN_START: ${{ inputs.start }}
+          SCAN_END: ${{ inputs.end }}
+          SCAN_CHUNK_SIZE: ${{ inputs.chunk_size }}
+          SCAN_THREADS: ${{ inputs.threads }}
+          SCAN_DELAY: ${{ inputs.delay }}
+          SCAN_MAX_PARALLEL: ${{ inputs.max_parallel }}
+          ALLOW_PROD: ${{ inputs.allow_prod }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+
+          def fail(message: str) -> None:
+              print(f"::error::{message}")
+              sys.exit(1)
+
+
+          def as_int(name: str, default: int) -> int:
+              raw = (os.environ.get(name) or "").strip() or str(default)
+              try:
+                  return int(raw)
+              except ValueError:
+                  fail(f"{name} 必须是整数，收到: {raw!r}")
+                  return default
+
+
+          def as_float(name: str, default: float) -> float:
+              raw = (os.environ.get(name) or "").strip() or str(default)
+              try:
+                  return float(raw)
+              except ValueError:
+                  fail(f"{name} 必须是数字，收到: {raw!r}")
+                  return default
+
+
+          scan_env = (os.environ.get("SCAN_ENV") or "test").strip() or "test"
+          if scan_env not in {"test", "prod"}:
+              fail(f"env 只能是 test 或 prod，收到: {scan_env!r}")
+
+          allow_prod = (os.environ.get("ALLOW_PROD") or "").strip().lower() in {"true", "1", "yes"}
+          if scan_env == "prod" and not allow_prod:
+              fail("env=prod 时必须显式确认 allow_prod（确认已获得 XDF 授权），否则请使用 test")
+
+          start = as_int("SCAN_START", 0)
+          end = as_int("SCAN_END", 99999)
+          chunk_size = as_int("SCAN_CHUNK_SIZE", 10000)
+          threads = as_int("SCAN_THREADS", 3)
+          max_parallel = as_int("SCAN_MAX_PARALLEL", 2)
+          delay = as_float("SCAN_DELAY", 0.5)
+
+          if not 0 <= start <= end <= 99999:
+              fail(f"号段非法: start={start}, end={end}（要求 0 <= start <= end <= 99999）")
+          if chunk_size < 1:
+              fail(f"chunk_size 必须 >= 1，收到: {chunk_size}")
+          if threads < 1:
+              fail(f"threads 必须 >= 1，收到: {threads}")
+          if delay < 0:
+              fail(f"delay 必须 >= 0，收到: {delay}")
+          if not 1 <= max_parallel <= 8:
+              fail(f"max_parallel 必须在 1~8 之间，收到: {max_parallel}")
+
+          chunks = []
+          cursor = start
+          while cursor <= end:
+              chunk_end = min(cursor + chunk_size - 1, end)
+              chunks.append(
+                  {
+                      "label": f"{cursor:05d}-{chunk_end:05d}",
+                      "start": str(cursor),
+                      "end": str(chunk_end),
+                  }
+              )
+              cursor = chunk_end + 1
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write("matrix=" + json.dumps({"include": chunks}, separators=(",", ":")) + "\n")
+              handle.write(f"max_parallel={max_parallel}\n")
+              handle.write(f"chunk_count={len(chunks)}\n")
+              handle.write(f"digits_total={end - start + 1}\n")
+
+          print(f"环境: {scan_env}（prod 已授权: {allow_prod}）")
+          print(f"号段: {start} ~ {end}（{end - start + 1} 个号码）")
+          print(f"分片: {len(chunks)} 个，每片最多 {chunk_size} 个号码")
+          print(f"并发 job: {max_parallel}，单片线程: {threads}，请求间隔: {delay}s")
+          print(f"预计总请求间隔时间: {round((end - start + 1) * delay / 60, 1)} 分钟")
+          PY
+
+  scan:
+    name: 扫描 ${{ matrix.start }} ~ ${{ matrix.end }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(needs.plan.outputs.max_parallel) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: 安装依赖
+        run: uv sync
+
+      - name: 恢复增量缓存
+        if: ${{ inputs.incremental }}
+        uses: actions/cache/restore@v4
+        with:
+          path: cache
+          key: scan-cache-${{ github.run_id }}-${{ matrix.label }}
+          restore-keys: |
+            scan-cache-
+
+      - name: 扫描 ${{ matrix.start }} ~ ${{ matrix.end }}
+        env:
+          SCAN_ENV: ${{ inputs.env }}
+          SCAN_START: ${{ matrix.start }}
+          SCAN_END: ${{ matrix.end }}
+          THREADS: ${{ inputs.threads }}
+          DELAY: ${{ inputs.delay }}
+          VERBOSE: ${{ inputs.verbose }}
+          INCREMENTAL: ${{ inputs.incremental }}
+          CACHE_TTL: ${{ inputs.cache_ttl }}
+          LABEL: ${{ matrix.label }}
+        run: |
+          mkdir -p out
+          args=(
+            --start "${SCAN_START}"
+            --end "${SCAN_END}"
+            --threads "${THREADS}"
+            --delay "${DELAY}"
+            --env "${SCAN_ENV}"
+            --output "out/valid_accounts_${LABEL}.txt"
+            --checkpoint "out/scan_progress_${LABEL}.json"
+            --log-file "out/scan_${LABEL}.log"
+          )
+          if [ "${VERBOSE}" = "true" ]; then
+            args+=(--verbose)
+          fi
+          if [ "${INCREMENTAL}" = "true" ]; then
+            if [ -f cache/scan_cache.json ]; then
+              cp cache/scan_cache.json "out/scan_cache_${LABEL}.json"
+              echo "已恢复历史增量缓存"
+            else
+              echo "无历史增量缓存，本次全量扫描并记录不可用账号"
+            fi
+            args+=(--incremental --cache "out/scan_cache_${LABEL}.json" --cache-ttl "${CACHE_TTL}")
+          fi
+          uv run xdfvafinder "${args[@]}"
+
+      - name: 上传分片结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-chunk-${{ matrix.label }}-${{ github.run_attempt }}
+          path: out/
+          retention-days: 14
+          if-no-files-found: warn
+
+  report:
+    name: 合并结果
+    needs: [plan, scan]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 下载全部分片
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: scan-chunk-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: 合并并生成汇总
+        env:
+          SCAN_ENV: ${{ inputs.env }}
+          SCAN_START: ${{ inputs.start }}
+          SCAN_END: ${{ inputs.end }}
+          CHUNK_COUNT: ${{ needs.plan.outputs.chunk_count }}
+          DIGITS_TOTAL: ${{ needs.plan.outputs.digits_total }}
+        run: |
+          python3 - <<'PY'
+          import glob
+          import json
+          import os
+          import pathlib
+          from datetime import datetime
+
+          scan_env = os.environ.get("SCAN_ENV", "")
+          start = os.environ.get("SCAN_START", "")
+          end = os.environ.get("SCAN_END", "")
+          expected = int(os.environ.get("CHUNK_COUNT") or 0)
+          digits_total = int(os.environ.get("DIGITS_TOTAL") or 0)
+
+          files = sorted(glob.glob("artifacts/**/valid_accounts_*.txt", recursive=True))
+          rows: dict[str, str] = {}
+          per_file: dict[str, int] = {}
+          for path in files:
+              lines = [
+                  line
+                  for line in pathlib.Path(path).read_text(encoding="utf-8").splitlines()
+                  if line and not line.startswith("#")
+              ]
+              per_file[pathlib.Path(path).name] = len(lines)
+              for line in lines:
+                  rows.setdefault(line.split("|", 1)[0], line)
+
+          out_dir = pathlib.Path("merged")
+          out_dir.mkdir(exist_ok=True)
+          header = [
+              f"# XDF 账号扫描结果（合并，env={scan_env}，range={start}~{end}）",
+              f"# 分片: {len(files)}/{expected}，有效账号（去重）: {len(rows)}",
+              "# 格式: 手机号|密码|u2_user_id|学员ID|学员编号|姓名|年级|学校ID|学校名",
+              "#",
+          ]
+          (out_dir / "valid_accounts_merged.txt").write_text(
+              "\n".join(header + [rows[mobile] for mobile in sorted(rows)]) + "\n",
+              encoding="utf-8",
+          )
+
+          # 合并各分片的增量缓存（同一号码取较新的时间戳），供下次运行恢复
+          cache_files = sorted(glob.glob("artifacts/**/scan_cache_*.json", recursive=True))
+          cache_entries: dict[str, str] = {}
+          for path in cache_files:
+              try:
+                  data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+              except ValueError:
+                  continue
+              invalid = data.get("invalid") if isinstance(data, dict) else None
+              if not isinstance(invalid, dict):
+                  continue
+              for digits, stamp in invalid.items():
+                  if not isinstance(stamp, str):
+                      continue
+                  known = cache_entries.get(str(digits))
+                  if known is None or stamp > known:
+                      cache_entries[str(digits)] = stamp
+
+          if cache_files:
+              payload = {
+                  "version": 1,
+                  "updated_at": datetime.now().isoformat(timespec="seconds"),
+                  "invalid": {
+                      digits: cache_entries[digits] for digits in sorted(cache_entries)
+                  },
+              }
+              cache_dir = pathlib.Path("cache")
+              cache_dir.mkdir(exist_ok=True)
+              (cache_dir / "scan_cache.json").write_text(
+                  json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                  encoding="utf-8",
+              )
+              (out_dir / "scan_cache.json").write_text(
+                  json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                  encoding="utf-8",
+              )
+
+          summary = {
+              "env": scan_env,
+              "start": start,
+              "end": end,
+              "digits_total": digits_total,
+              "chunks_expected": expected,
+              "chunks_collected": len(files),
+              "valid_accounts": len(rows),
+              "cache_entries": len(cache_entries),
+              "per_chunk": per_file,
+          }
+          (out_dir / "scan_summary.json").write_text(
+              json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          lines = [
+              "## XDF 账号扫描结果",
+              "",
+              f"- 环境: `{scan_env}`",
+              f"- 号段: `{start}` ~ `{end}`（{digits_total} 个号码）",
+              f"- 分片回收: {len(files)}/{expected}",
+              f"- 有效账号（去重）: **{len(rows)}**",
+              "",
+          ]
+          if len(files) < expected:
+              lines.append(f"> ⚠️ 有 {expected - len(files)} 个分片没有结果，请查看失败的 job。")
+              lines.append("")
+          if per_file:
+              lines += ["| 分片文件 | 有效账号 |", "|---|---|"]
+              lines += [f"| `{name}` | {count} |" for name, count in sorted(per_file.items())]
+          if cache_files:
+              lines += [
+                  "",
+                  f"- 增量缓存: {len(cache_entries)} 条已知不可用（来自 {len(cache_files)} 个分片）",
+              ]
+          step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if step_summary:
+              with open(step_summary, "a", encoding="utf-8") as handle:
+                  handle.write("\n".join(lines) + "\n")
+
+          print(
+              f"合并 {len(files)} 个分片，去重后有效账号 {len(rows)} 个，"
+              f"增量缓存 {len(cache_entries)} 条"
+          )
+          PY
+
+      - name: 上传合并结果
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-result-${{ github.run_attempt }}
+          path: merged/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: 保存增量缓存
+        if: always() && hashFiles('cache/scan_cache.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: cache
+          key: scan-cache-${{ github.run_id }}-${{ github.run_attempt }}

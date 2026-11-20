@@ -1,0 +1,33 @@
+# 每周自动扫描：每周一 01:00 UTC（北京时间 09:00）
+#
+# 注意：schedule 只在默认分支上生效，改完后要合并/推送到默认分支才会开始计时。
+# 参数取自仓库变量（Settings → Secrets and variables → Actions → Variables），
+# 未设置时使用下面的默认值。prod 需要把 SCAN_ALLOW_PROD 设为 true 才会执行。
+
+name: Scan (weekly)
+
+on:
+  schedule:
+    # 分 时 日 月 周：每周一 01:00 UTC = 北京时间 09:00
+    - cron: "0 1 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: 每周扫描
+    uses: ./.github/workflows/scan-run.yml
+    with:
+      env: ${{ vars.SCAN_ENV || 'test' }}
+      start: ${{ vars.SCAN_START || '0' }}
+      end: ${{ vars.SCAN_END || '99999' }}
+      chunk_size: ${{ vars.SCAN_CHUNK_SIZE || '10000' }}
+      threads: ${{ vars.SCAN_THREADS || '3' }}
+      delay: ${{ vars.SCAN_DELAY || '0.5' }}
+      max_parallel: ${{ vars.SCAN_MAX_PARALLEL || '2' }}
+      incremental: true
+      cache_ttl: ${{ vars.SCAN_CACHE_TTL || '30' }}
+      verbose: false
+      allow_prod: ${{ vars.SCAN_ALLOW_PROD == 'true' }}

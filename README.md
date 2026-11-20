@@ -250,8 +250,10 @@ uv run python debug_login.py -m 13800138000 -p mypassword --env test
 ### 产物与配额
 
 - 每个分片：`scan-chunk-<start>-<end>-<attempt>` 产物（14 天），含结果文件、断点、日志和增量缓存片段
-- 合并结果：`scan-result-<attempt>` 产物（30 天），含 `valid_accounts_merged.txt`、`scan_summary.json`、
-  合并后的 `scan_cache.json`（名称带 attempt 后缀，重跑不会和上一次冲突）
+- 合并结果：`scan-result-<attempt>` 产物（30 天），含 `valid_accounts_merged.txt`、`valid_accounts_merged.csv`、
+  `scan_summary.json`、合并后的 `scan_cache.json`（名称带 attempt 后缀，重跑不会和上一次冲突）
+- 单文件 CSV：`scan-csv-<attempt>` 产物（30 天），只有 `valid_accounts_merged.csv` 一个文件，
+  表头是中文列名，UTF-8 BOM 编码，Excel 双击打开不乱码
 - 单个 job 超时 350 分钟；建议 `chunk_size × delay` 控制在 4 小时以内
 - 运行分钟粗算：`号码数 × delay / 60`。全量 10 万号 + `delay=0.5` ≈ 833 分钟/次；
   私有仓库免费额度是 2000 分钟/月，建议调小号段、`SCAN_DELAY`（例如 `0.2`）或降低频率

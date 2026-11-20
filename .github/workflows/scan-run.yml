@@ -265,6 +265,7 @@ jobs:
           DIGITS_TOTAL: ${{ needs.plan.outputs.digits_total }}
         run: |
           python3 - <<'PY'
+          import csv
           import glob
           import json
           import os
@@ -298,10 +299,33 @@ jobs:
               "# 格式: 手机号|密码|u2_user_id|学员ID|学员编号|姓名|年级|学校ID|学校名",
               "#",
           ]
+          merged_lines = [rows[mobile] for mobile in sorted(rows)]
           (out_dir / "valid_accounts_merged.txt").write_text(
-              "\n".join(header + [rows[mobile] for mobile in sorted(rows)]) + "\n",
+              "\n".join(header + merged_lines) + "\n",
               encoding="utf-8",
           )
+
+          # 额外输出一份单文件 CSV：UTF-8 BOM，Excel 直接双击不乱码
+          csv_columns = [
+              "手机号",
+              "密码",
+              "u2_user_id",
+              "学员ID",
+              "学员编号",
+              "姓名",
+              "年级",
+              "学校ID",
+              "学校名",
+          ]
+          with (out_dir / "valid_accounts_merged.csv").open(
+              "w", encoding="utf-8-sig", newline=""
+          ) as handle:
+              writer = csv.writer(handle)
+              writer.writerow(csv_columns)
+              for line in merged_lines:
+                  fields = line.split("|")
+                  fields += [""] * (len(csv_columns) - len(fields))
+                  writer.writerow(fields[: len(csv_columns)])
 
           # 合并各分片的增量缓存（同一号码取较新的时间戳），供下次运行恢复
           cache_files = sorted(glob.glob("artifacts/**/scan_cache_*.json", recursive=True))
@@ -349,6 +373,7 @@ jobs:
               "chunks_collected": len(files),
               "valid_accounts": len(rows),
               "cache_entries": len(cache_entries),
+              "csv": "valid_accounts_merged.csv",
               "per_chunk": per_file,
           }
           (out_dir / "scan_summary.json").write_text(
@@ -376,6 +401,10 @@ jobs:
                   "",
                   f"- 增量缓存: {len(cache_entries)} 条已知不可用（来自 {len(cache_files)} 个分片）",
               ]
+          lines += [
+              "",
+              f"- 单文件 CSV: `valid_accounts_merged.csv`（{len(merged_lines)} 行，UTF-8 BOM）",
+          ]
           step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
           if step_summary:
               with open(step_summary, "a", encoding="utf-8") as handle:
@@ -395,6 +424,14 @@ jobs:
           path: merged/
           retention-days: 30
           if-no-files-found: warn
+
+      - name: 上传 CSV
+        if: always() && hashFiles('merged/valid_accounts_merged.csv') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-csv-${{ github.run_attempt }}
+          path: merged/valid_accounts_merged.csv
+          retention-days: 30
 
       - name: 保存增量缓存
         if: always() && hashFiles('cache/scan_cache.json') != ''

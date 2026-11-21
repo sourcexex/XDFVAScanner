@@ -14,6 +14,8 @@ on:
 
 permissions:
   contents: read
+  pages: write
+  id-token: write
 
 jobs:
   scan:
@@ -29,5 +31,6 @@ jobs:
       max_parallel: ${{ vars.SCAN_MAX_PARALLEL || '2' }}
       incremental: true
       cache_ttl: ${{ vars.SCAN_CACHE_TTL || '30' }}
+      publish_pages: ${{ vars.SCAN_PUBLISH_PAGES != 'false' }}
       verbose: false
       allow_prod: ${{ vars.SCAN_ALLOW_PROD == 'true' }}

@@ -207,7 +207,8 @@ uv run python debug_login.py -m 13800138000 -p mypassword --env test
 | Scan (reusable) | `.github/workflows/scan-run.yml` | 被上面两个调用 | plan → scan → report |
 
 执行流程：`plan` 校验参数并把号段切成若干片 → `scan` 用矩阵并发跑分片（每个 job 独立扫描，
-受 6 小时 job 上限约束）→ `report` 合并去重、生成 `scan_summary.json`，并在 run 页面写入汇总表。
+受 6 小时 job 上限约束）→ `report` 合并去重、生成 `scan_summary.json`，并在 run 页面写入汇总表
+→ `pages` 把虚拟号列表发布到 GitHub Pages。
 
 ### 手动扫描
 
@@ -221,6 +222,7 @@ uv run python debug_login.py -m 13800138000 -p mypassword --env test
 | `chunk_size` | 每个 job 负责的号码数 |
 | `threads` / `delay` | 单 job 的线程数与请求间隔（秒） |
 | `max_parallel` | 同时运行的 job 数（1~8） |
+| `publish_pages` | 是否把虚拟号列表发布到 GitHub Pages（默认开） |
 | `verbose` | 输出详细日志 |
 
 ### 每周自动扫描
@@ -237,6 +239,7 @@ uv run python debug_login.py -m 13800138000 -p mypassword --env test
 | `SCAN_DELAY` | `0.5` | 单 job 请求间隔（秒） |
 | `SCAN_MAX_PARALLEL` | `2` | 并发 job 数（1~8） |
 | `SCAN_CACHE_TTL` | `30` | 增量缓存有效期（天），`0` 表示永不过期 |
+| `SCAN_PUBLISH_PAGES` | 未设置 | 设为 `false` 可关闭每周任务的 Pages 发布 |
 | `SCAN_ALLOW_PROD` | 未设置 | 设为 `true` 才允许每周扫 `prod` |
 
 - 增量扫描默认开启：每个分片先从上一次运行的 Actions Cache 恢复 `scan_cache.json`，
@@ -251,7 +254,8 @@ uv run python debug_login.py -m 13800138000 -p mypassword --env test
 
 - 每个分片：`scan-chunk-<start>-<end>-<attempt>` 产物（14 天），含结果文件、断点、日志和增量缓存片段
 - 合并结果：`scan-result-<attempt>` 产物（30 天），含 `valid_accounts_merged.txt`、`valid_accounts_merged.csv`、
-  `scan_summary.json`、合并后的 `scan_cache.json`（名称带 attempt 后缀，重跑不会和上一次冲突）
+  `scan_summary.json`、`accounts.json`（Pages 用数据，字段与 CSV 一致）、合并后的 `scan_cache.json`
+  （名称带 attempt 后缀，重跑不会和上一次冲突）
 - 单文件 CSV：`scan-csv-<attempt>` 产物（30 天），只有 `valid_accounts_merged.csv` 一个文件，
   表头是中文列名，UTF-8 BOM 编码，Excel 双击打开不乱码
 - 单个 job 超时 350 分钟；建议 `chunk_size × delay` 控制在 4 小时以内
@@ -262,6 +266,27 @@ uv run python debug_login.py -m 13800138000 -p mypassword --env test
 
 > ⚠️ artifact 里同样是**明文密码**。请收紧仓库可见性、按需缩短保留期，并在每次定时扫描前
 > 确认授权仍然有效；`prod` 默认不允许自动扫描。
+
+### GitHub Pages（账号列表）
+
+每次扫描结束后会多跑一个 `pages` job，把当前有效账号发布成静态页面：
+
+**https://sourcexex.github.io/XDFVAScanner/**
+
+- 页面展示与 CSV 相同的全部字段：手机号、密码、u2_user_id、学员ID、学员编号、姓名、年级、学校ID、学校名
+- 支持搜索（手机号/姓名/学员编号等）、分页、整行复制、横向滚动 + 固定首列，亮色/暗色自适应，GitHub 极简风格
+- 页面源码在 `site/`，数据在 `data/accounts.json`，每次扫描自动覆盖
+
+首次使用需要在仓库里开一次（只需一次）：
+
+1. 打开 `Settings → Pages`
+2. **Build and deployment → Source** 选择 **GitHub Actions**
+
+之后手动/每周扫描都会自动更新页面。某次不想发布，把 `publish_pages` 关掉即可
+（每周任务可用变量 `SCAN_PUBLISH_PAGES=false`）。
+
+> ⚠️ **页面包含明文密码**，公开仓库的 Pages 对所有人可见（已加 `noindex`，但只是不被搜索引擎收录）。
+> 要么把仓库转私有（私有仓库用 Pages 需要 GitHub 付费方案），要么关掉 Pages 发布（`SCAN_PUBLISH_PAGES=false`）。
 
 ## 项目结构
 
@@ -287,6 +312,7 @@ XDFVAScanner/
 │       ├── agora.py        #   Agora RTC Token
 │       └── whiteboard.py   #   白板信令
 ├── bridge/                 # xdflib IM 的 Node 桥接（可选，需 npm install）
+├── site/                   # GitHub Pages 静态站点（虚拟号列表，纯 HTML/CSS/JS）
 ├── tests/                  # 离线单元测试（加密、消息、断点、结果写入、扫描流程）
 ├── pyproject.toml          # 依赖、打包、pytest 与 ruff 配置
 └── uv.lock

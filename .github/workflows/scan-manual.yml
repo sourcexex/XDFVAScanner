@@ -50,6 +50,10 @@ on:
         description: "增量缓存有效期（天），0 表示永不过期"
         type: string
         default: "30"
+      publish_pages:
+        description: "把虚拟号列表发布到 GitHub Pages"
+        type: boolean
+        default: true
       verbose:
         description: "输出详细日志"
         type: boolean
@@ -57,6 +61,8 @@ on:
 
 permissions:
   contents: read
+  pages: write
+  id-token: write
 
 jobs:
   scan:
@@ -72,5 +78,6 @@ jobs:
       max_parallel: ${{ inputs.max_parallel }}
       incremental: ${{ inputs.incremental }}
       cache_ttl: ${{ inputs.cache_ttl }}
+      publish_pages: ${{ inputs.publish_pages }}
       verbose: ${{ inputs.verbose }}
       allow_prod: ${{ inputs.confirm_prod }}

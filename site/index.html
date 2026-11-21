@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow, noarchive">
+  <title>虚拟号账号列表 · XDFVAScanner</title>
+  <meta name="description" content="XDFVAScanner 自动扫描得到的虚拟号账号与学员列表">
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="container header-inner">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">144</span>
+        <div class="brand-text">
+          <h1>虚拟号账号列表</h1>
+          <p class="muted" id="subtitle">XDFVAScanner · 自动扫描结果</p>
+        </div>
+      </div>
+      <a class="btn" href="https://github.com/sourcexex/XDFVAScanner" rel="noreferrer">源码仓库</a>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="stats" id="stats" hidden>
+      <div class="stat">
+        <span class="stat-label">有效账号</span>
+        <strong id="stat-count">—</strong>
+      </div>
+      <div class="stat">
+        <span class="stat-label">扫描范围</span>
+        <strong id="stat-range">—</strong>
+      </div>
+      <div class="stat">
+        <span class="stat-label">最近更新</span>
+        <strong id="stat-updated">—</strong>
+      </div>
+    </section>
+
+    <section class="panel" aria-label="账号列表">
+      <div class="toolbar">
+        <label class="search">
+          <svg class="search-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <path fill="currentColor" d="M10.68 11.74a6 6 0 0 1-7.922-8.982 6 6 0 0 1 8.982 7.922l3.04 3.04a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215ZM11.5 7a4.499 4.499 0 1 0-8.997 0A4.499 4.499 0 0 0 11.5 7Z"></path>
+          </svg>
+          <input id="search" type="search" placeholder="搜索手机号 / 姓名 / 学员编号" autocomplete="off" spellcheck="false" aria-label="搜索账号">
+        </label>
+        <span class="muted" id="count">—</span>
+        <button class="btn" id="copy-all" type="button">复制全部</button>
+      </div>
+
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th scope="col">手机号</th>
+              <th scope="col">密码</th>
+              <th scope="col">u2_user_id</th>
+              <th scope="col">学员ID</th>
+              <th scope="col">学员编号</th>
+              <th scope="col">姓名</th>
+              <th scope="col">年级</th>
+              <th scope="col">学校ID</th>
+              <th scope="col">学校名</th>
+              <th class="col-copy" scope="col"><span class="sr-only">复制</span></th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+
+      <div class="empty" id="empty" hidden>
+        <p class="empty-title">还没有数据</p>
+        <p class="muted" id="empty-hint">等待第一次扫描完成后自动发布。</p>
+      </div>
+
+      <div class="pager" id="pager" hidden>
+        <button class="btn" id="prev" type="button">上一页</button>
+        <span class="muted" id="page-info">—</span>
+        <button class="btn" id="next" type="button">下一页</button>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <span class="muted" id="generated"></span>
+      <span class="muted">·</span>
+      <span class="muted">页面含明文凭据，仅限授权测试使用</span>
+    </footer>
+  </main>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <noscript><p class="container muted">需要启用 JavaScript 才能显示列表。</p></noscript>
+  <script src="assets/app.js"></script>
+</body>
+</html>

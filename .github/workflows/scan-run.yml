@@ -44,6 +44,10 @@ on:
         description: "增量缓存有效期（天），0 表示永不过期"
         type: string
         default: "30"
+      publish_pages:
+        description: "把虚拟号列表发布到 GitHub Pages"
+        type: boolean
+        default: true
       verbose:
         description: "是否输出详细日志"
         type: boolean
@@ -270,7 +274,7 @@ jobs:
           import json
           import os
           import pathlib
-          from datetime import datetime
+          from datetime import datetime, timezone
 
           scan_env = os.environ.get("SCAN_ENV", "")
           start = os.environ.get("SCAN_START", "")
@@ -279,7 +283,7 @@ jobs:
           digits_total = int(os.environ.get("DIGITS_TOTAL") or 0)
 
           files = sorted(glob.glob("artifacts/**/valid_accounts_*.txt", recursive=True))
-          rows: dict[str, str] = {}
+          unique_rows: dict[str, str] = {}
           per_file: dict[str, int] = {}
           for path in files:
               lines = [
@@ -287,19 +291,27 @@ jobs:
                   for line in pathlib.Path(path).read_text(encoding="utf-8").splitlines()
                   if line and not line.startswith("#")
               ]
-              per_file[pathlib.Path(path).name] = len(lines)
+              # 分片按"账号"计数（同一账号多个学员只算 1 个）
+              per_file[pathlib.Path(path).name] = len(
+                  {line.split("|", 1)[0] for line in lines}
+              )
               for line in lines:
-                  rows.setdefault(line.split("|", 1)[0], line)
+                  unique_rows.setdefault(line, line)
+
+          accounts = sorted({line.split("|", 1)[0] for line in unique_rows})
 
           out_dir = pathlib.Path("merged")
           out_dir.mkdir(exist_ok=True)
           header = [
               f"# XDF 账号扫描结果（合并，env={scan_env}，range={start}~{end}）",
-              f"# 分片: {len(files)}/{expected}，有效账号（去重）: {len(rows)}",
+              f"# 分片: {len(files)}/{expected}，有效账号: {len(accounts)}，明细行: {len(unique_rows)}",
               "# 格式: 手机号|密码|u2_user_id|学员ID|学员编号|姓名|年级|学校ID|学校名",
               "#",
           ]
-          merged_lines = [rows[mobile] for mobile in sorted(rows)]
+          merged_lines = [
+              unique_rows[line]
+              for line in sorted(unique_rows, key=lambda item: (item.split("|", 1)[0], item))
+          ]
           (out_dir / "valid_accounts_merged.txt").write_text(
               "\n".join(header + merged_lines) + "\n",
               encoding="utf-8",
@@ -364,6 +376,33 @@ jobs:
                   encoding="utf-8",
               )
 
+          # Pages 用数据：与 CSV 完全相同的字段（含明文密码，发布前请确认仓库可见性）
+          field_names = [
+              "mobile",
+              "password",
+              "u2_user_id",
+              "student_id",
+              "student_code",
+              "real_name",
+              "grade_name",
+              "school_id",
+              "school_name",
+          ]
+          accounts_payload = {
+              "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+              "env": scan_env,
+              "range": {"start": int(start), "end": int(end)},
+              "count": len(accounts),
+              "rows": [
+                  dict(zip(field_names, line.split("|"), strict=False))
+                  for line in merged_lines
+              ],
+          }
+          (out_dir / "accounts.json").write_text(
+              json.dumps(accounts_payload, ensure_ascii=False, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+
           summary = {
               "env": scan_env,
               "start": start,
@@ -371,7 +410,8 @@ jobs:
               "digits_total": digits_total,
               "chunks_expected": expected,
               "chunks_collected": len(files),
-              "valid_accounts": len(rows),
+              "valid_accounts": len(accounts),
+              "rows": len(unique_rows),
               "cache_entries": len(cache_entries),
               "csv": "valid_accounts_merged.csv",
               "per_chunk": per_file,
@@ -387,7 +427,7 @@ jobs:
               f"- 环境: `{scan_env}`",
               f"- 号段: `{start}` ~ `{end}`（{digits_total} 个号码）",
               f"- 分片回收: {len(files)}/{expected}",
-              f"- 有效账号（去重）: **{len(rows)}**",
+              f"- 有效账号: **{len(accounts)}**（明细行 {len(unique_rows)}）",
               "",
           ]
           if len(files) < expected:
@@ -411,7 +451,7 @@ jobs:
                   handle.write("\n".join(lines) + "\n")
 
           print(
-              f"合并 {len(files)} 个分片，去重后有效账号 {len(rows)} 个，"
+              f"合并 {len(files)} 个分片，有效账号 {len(accounts)} 个（明细行 {len(unique_rows)}），"
               f"增量缓存 {len(cache_entries)} 条"
           )
           PY
@@ -439,3 +479,57 @@ jobs:
         with:
           path: cache
           key: scan-cache-${{ github.run_id }}-${{ github.run_attempt }}
+
+  pages:
+    name: 发布 Pages
+    needs: [plan, report]
+    if: always() && inputs.publish_pages && needs.report.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载合并结果
+        uses: actions/download-artifact@v4
+        with:
+          name: scan-result-${{ github.run_attempt }}
+          path: merged
+
+      - name: 组装站点
+        run: |
+          mkdir -p _site/data
+          cp -r site/. _site/
+          cp merged/accounts.json _site/data/accounts.json
+          python3 - <<'PY'
+          import json
+          import pathlib
+
+          data = json.loads(pathlib.Path("_site/data/accounts.json").read_text(encoding="utf-8"))
+          print(f"站点数据: {data.get('count', 0)} 条记录（env={data.get('env')}）")
+          PY
+
+      - name: 配置 Pages
+        continue-on-error: true
+        uses: actions/configure-pages@v5
+
+      - name: 上传站点
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: 部署 Pages
+        id: deploy
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+
+      - name: 部署失败提示
+        if: steps.deploy.outcome == 'failure'
+        run: |
+          echo "::warning::Pages 部署失败：请到 Settings → Pages 把 Source 设为 \"GitHub Actions\"，然后重跑该 job。"

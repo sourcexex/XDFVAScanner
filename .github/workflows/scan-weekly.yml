@@ -2,7 +2,8 @@
 #
 # 注意：schedule 只在默认分支上生效，改完后要合并/推送到默认分支才会开始计时。
 # 参数取自仓库变量（Settings → Secrets and variables → Actions → Variables），
-# 未设置时使用下面的默认值。prod 需要把 SCAN_ALLOW_PROD 设为 true 才会执行。
+# 未设置时使用下面的默认值：默认扫描 prod（需确认授权），可用 SCAN_ENV 覆盖，
+# 用 SCAN_ALLOW_PROD=false 可禁止 prod（plan 阶段会直接失败）。
 
 name: Scan (weekly)
 
@@ -22,7 +23,7 @@ jobs:
     name: 每周扫描
     uses: ./.github/workflows/scan-run.yml
     with:
-      env: ${{ vars.SCAN_ENV || 'test' }}
+      env: ${{ vars.SCAN_ENV || 'prod' }}
       start: ${{ vars.SCAN_START || '0' }}
       end: ${{ vars.SCAN_END || '99999' }}
       chunk_size: ${{ vars.SCAN_CHUNK_SIZE || '10000' }}
@@ -33,4 +34,4 @@ jobs:
       cache_ttl: ${{ vars.SCAN_CACHE_TTL || '30' }}
       publish_pages: ${{ vars.SCAN_PUBLISH_PAGES != 'false' }}
       verbose: false
-      allow_prod: ${{ vars.SCAN_ALLOW_PROD == 'true' }}
+      allow_prod: ${{ vars.SCAN_ALLOW_PROD != 'false' }}

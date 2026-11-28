@@ -203,7 +203,7 @@ uv run python debug_login.py -m 13800138000 -p mypassword --env test
 | 工作流 | 文件 | 触发方式 | 默认行为 |
 |---|---|---|---|
 | Scan (manual) | `.github/workflows/scan-manual.yml` | 手动 `Run workflow` | `test` 环境、全号段、每片 10000 个号码 |
-| Scan (weekly) | `.github/workflows/scan-weekly.yml` | 每周一 01:00 UTC + 手动 | 读仓库变量，缺省 `test` 环境 |
+| Scan (weekly) | `.github/workflows/scan-weekly.yml` | 每周一 01:00 UTC + 手动 | 读仓库变量，缺省 `prod` 环境 |
 | Scan (reusable) | `.github/workflows/scan-run.yml` | 被上面两个调用 | plan → scan → report |
 
 执行流程：`plan` 校验参数并把号段切成若干片 → `scan` 用矩阵并发跑分片（每个 job 独立扫描，
@@ -228,11 +228,12 @@ uv run python debug_login.py -m 13800138000 -p mypassword --env test
 ### 每周自动扫描
 
 - 时间：`0 1 * * 1`，即**每周一 01:00 UTC / 北京时间 09:00**
+- **默认扫描 `prod` 生产环境**（需确认授权仍然有效）；想改回测试环境可设 `SCAN_ENV=test`
 - 参数取自仓库变量（`Settings → Secrets and variables → Actions → Variables`）：
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `SCAN_ENV` | `test` | 扫描环境 |
+| `SCAN_ENV` | `prod` | 扫描环境（设为 `test` 可切回测试环境） |
 | `SCAN_START` / `SCAN_END` | `0` / `99999` | 号段 |
 | `SCAN_CHUNK_SIZE` | `10000` | 每片号码数 |
 | `SCAN_THREADS` | `3` | 单 job 线程数 |
@@ -240,7 +241,7 @@ uv run python debug_login.py -m 13800138000 -p mypassword --env test
 | `SCAN_MAX_PARALLEL` | `2` | 并发 job 数（1~8） |
 | `SCAN_CACHE_TTL` | `30` | 增量缓存有效期（天），`0` 表示永不过期 |
 | `SCAN_PUBLISH_PAGES` | 未设置 | 设为 `false` 可关闭每周任务的 Pages 发布 |
-| `SCAN_ALLOW_PROD` | 未设置 | 设为 `true` 才允许每周扫 `prod` |
+| `SCAN_ALLOW_PROD` | 未设置（允许） | 设为 `false` 可禁止每周任务扫描 `prod`（plan 阶段直接失败） |
 
 - 增量扫描默认开启：每个分片先从上一次运行的 Actions Cache 恢复 `scan_cache.json`，
   扫完由合并 job 汇总、保存为新的缓存。**首次运行等于全量**，之后会跳过已知不可用的号码，快很多
@@ -264,8 +265,8 @@ uv run python debug_login.py -m 13800138000 -p mypassword --env test
 - runner 是一次性的，`--resume` 在 CI 里没有意义：断点只在单个 job 内消解在途号码，
   跨 job / 跨运行不会续扫，失败就重跑那一片
 
-> ⚠️ artifact 里同样是**明文密码**。请收紧仓库可见性、按需缩短保留期，并在每次定时扫描前
-> 确认授权仍然有效；`prod` 默认不允许自动扫描。
+> ⚠️ artifact 里同样是**明文密码**。请收紧仓库可见性、按需缩短保留期；每周任务默认已对 `prod`
+> 扫描，每次定时运行前请确认授权仍然有效。
 
 ### GitHub Pages（账号列表）
 
@@ -286,6 +287,7 @@ uv run python debug_login.py -m 13800138000 -p mypassword --env test
 （每周任务可用变量 `SCAN_PUBLISH_PAGES=false`）。
 
 > ⚠️ **页面包含明文密码**，公开仓库的 Pages 对所有人可见（已加 `noindex`，但只是不被搜索引擎收录）。
+> 每周任务现在扫描的是 `prod`，页面会每周发布一次**真实账号的凭据**。
 > 要么把仓库转私有（私有仓库用 Pages 需要 GitHub 付费方案），要么关掉 Pages 发布（`SCAN_PUBLISH_PAGES=false`）。
 
 ## 项目结构

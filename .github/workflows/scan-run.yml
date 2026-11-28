@@ -195,9 +195,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: cache
-          key: scan-cache-${{ github.run_id }}-${{ matrix.label }}
+          key: scan-cache-${{ inputs.env }}-${{ github.run_id }}-${{ matrix.label }}
           restore-keys: |
-            scan-cache-
+            scan-cache-${{ inputs.env }}-
 
       - name: 扫描 ${{ matrix.start }} ~ ${{ matrix.end }}
         env:
@@ -478,7 +478,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: cache
-          key: scan-cache-${{ github.run_id }}-${{ github.run_attempt }}
+          key: scan-cache-${{ inputs.env }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   pages:
     name: 发布 Pages
